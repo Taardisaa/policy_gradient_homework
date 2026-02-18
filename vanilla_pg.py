@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
@@ -8,7 +9,11 @@ from gymnasium.spaces import Discrete, Box
 import os
 import matplotlib
 from pathlib import Path
-matplotlib.use('Agg')
+
+# Choose backend before importing pyplot.
+# TkAgg works over SSH X11 without OpenGL/GLX; Agg is headless-only.
+_live_render = '--render' in sys.argv and '--save-gif' not in sys.argv
+matplotlib.use('TkAgg' if _live_render else 'Agg')
 import matplotlib.pyplot as plt
 
 
@@ -24,8 +29,8 @@ def mlp(sizes, activation=nn.Tanh, output_activation=nn.Identity):
     return nn.Sequential(*layers)
 
 
-def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2, 
-          epochs=50, batch_size=5000, render=False):
+def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
+          epochs=50, batch_size=5000, render=False, save_gif=False):
 
     # make environment, check spaces, get obs / act dims
     env = gym.make(env_name)
@@ -57,6 +62,54 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
     # make optimizer
     optimizer = Adam(logits_net.parameters(), lr=lr)
 
+    # run one episode to visualize the current policy.
+    # Uses rgb_array rendering + matplotlib to avoid pygame/GLX/OpenGL,
+    # which fails over SSH X11 forwarding on headless GPU servers.
+    def render_episode(epoch, save_gif=False, gif_dir='results/vanilla_pg/frames'):
+        # Tell SDL to render offscreen — no window, no GLX needed.
+        os.environ['SDL_VIDEODRIVER'] = 'offscreen'
+        render_env = gym.make(env_name, render_mode="rgb_array")
+        obs, info = render_env.reset()
+        done = False
+        ep_ret = 0
+        frames = []
+
+        if not save_gif:
+            plt.ion()
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.axis('off')
+            img_display = ax.imshow(render_env.render())
+            ax.set_title(f'Epoch {epoch}')
+            plt.tight_layout()
+            plt.pause(0.001)
+
+        while not done:
+            frame = render_env.render()
+            frames.append(frame)
+            if not save_gif:
+                img_display.set_data(frame)
+                plt.pause(0.05)  # ~20 fps
+            with torch.no_grad():
+                act = get_action(torch.as_tensor(obs, dtype=torch.float32))
+            obs, rew, terminated, truncated, info = render_env.step(act)
+            done = terminated or truncated
+            ep_ret += rew
+
+        render_env.close()
+
+        if not save_gif:
+            plt.ioff()
+            plt.close(fig)
+
+        if save_gif and frames:
+            import imageio
+            os.makedirs(gif_dir, exist_ok=True)
+            gif_path = os.path.join(gif_dir, f'epoch_{epoch:03d}.gif')
+            imageio.mimsave(gif_path, frames, fps=30)
+            print(f'  [render] saved {gif_path}')
+
+        return ep_ret
+
     # for training policy
     def train_one_epoch():
         # make some empty lists for logging.
@@ -71,15 +124,8 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
         done = False            # signal from environment that episode is over
         ep_rews = []            # list for rewards accrued throughout ep
 
-        # render first episode of each epoch
-        finished_rendering_this_epoch = False
-
         # collect experience by acting in the environment with current policy
         while True:
-
-            # rendering
-            if (not finished_rendering_this_epoch) and render:
-                env.render()
 
             # save obs
             batch_obs.append(obs.copy())
@@ -106,9 +152,6 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
                 obs, info = env.reset()
                 done, ep_rews = False, []
 
-                # won't render again this epoch
-                finished_rendering_this_epoch = True
-
                 # end experience loop if we have enough of it
                 if len(batch_obs) > batch_size:
                     break
@@ -121,7 +164,7 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
                                   )
         batch_loss.backward()
         optimizer.step()
-        return batch_loss, batch_rets, batch_lens
+        return batch_loss.item(), batch_rets, batch_lens
 
     # training loop
     history = {'epoch': [], 'return': []}
@@ -132,6 +175,9 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
         history['return'].append(mean_ret)
         print('epoch: %3d \t loss: %.3f \t return: %.3f \t ep_len: %.3f'%
                 (i, batch_loss, mean_ret, np.mean(batch_lens)))
+        if render:
+            ep_ret = render_episode(i, save_gif=save_gif)
+            print(f'  [render] episode return: {ep_ret:.1f}')
 
     return history
 
@@ -158,6 +204,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', '--env', type=str, default='CartPole-v1')
     parser.add_argument('--render', action='store_true')
+    parser.add_argument('--save-gif', action='store_true',
+                        help='save per-epoch GIFs instead of live render (use on headless servers)')
     parser.add_argument('--lr', type=float, default=1e-2)
     parser.add_argument('--num-runs', type=int, default=1)
     args = parser.parse_args()
@@ -171,5 +219,6 @@ if __name__ == '__main__':
         out_path = f'results/vanilla_pg/return_run{run}.png' if args.num_runs > 1 else 'results/vanilla_pg/return.png'
         if Path(out_path).exists():
             continue
-        history = train(env_name=args.env_name, render=args.render, lr=args.lr)
+        history = train(env_name=args.env_name, render=args.render or args.save_gif,
+                        save_gif=args.save_gif, lr=args.lr)
         save_chart(history, out_path, args.env_name, run=run if args.num_runs > 1 else None)

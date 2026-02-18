@@ -39,3 +39,28 @@ As shown above, the return is not monotonically improving. In some runs (run 0, 
 
 ## Part 1b: Understanding and Implementing a Basic Policy Gradient Algorithm
 
+I implemented the render function in `1_simple_pg_gymnasium.py` to visualize the agent's behavior. Below is one of the rendered policies in an epoch:
+
+![Rendered Policy](results/vanilla_pg/frames/epoch_026.gif)
+
+## Discussion
+
+**What do you notice qualitatively about how its policy changes over time?**
+
+In the first few episodes (0~16): The agent failed to make corrective actions in time, resulting in the pole falling down quickly in a direction.
+
+In the middle episodes (17~33): The agent started to learn to make corrective actions in time, but sometimes the actions are too aggressive, causing the cart to move to the edge of the track.
+
+In the final episodes (34~49): The agent learned to make more balanced actions to keep the pole upright for a longer time, and also keep the cart within the track. In the final episode, the agent successfully kept the pole upright for a long time, reaching the maximum return of 500.
+
+![Final Episode](results/vanilla_pg/frames/epoch_049.gif)
+
+## Part 2: Reducing Variance with Reward-to-Go
+
+I added the reward-to-go implementation in `reward_to_go.py` and ran both the vanilla policy gradient and reward-to-go implementations 5 times each. The learning curves are shown below:
+
+![Vanilla PG vs Reward-to-Go](results/comparison.png)
+
+Generally speaking the reward-to-go implementation achieves higher returns than the vanilla one on average return, indicating that it is more stable and possibly more effective in learning a policy. However, the reward-to-go implementation still has some flucturations and drops in the final epochs.
+
+## Part 3: Continuous Actions
