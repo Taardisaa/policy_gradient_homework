@@ -5,14 +5,24 @@ from torch.optim import Adam
 import numpy as np
 import gymnasium as gym
 from gymnasium.spaces import Discrete, Box
+import os
+import matplotlib
+from pathlib import Path
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 
 def mlp(sizes, activation=nn.Tanh, output_activation=nn.Identity):
+    """
+    Implementation of MLP.
+    """
     # Build a feedforward neural network.
     layers = []
     for j in range(len(sizes)-1):
         act = activation if j < len(sizes)-2 else output_activation
         layers += [nn.Linear(sizes[j], sizes[j+1]), act()]
     return nn.Sequential(*layers)
+
 
 def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2, 
           epochs=50, batch_size=5000, render=False):
@@ -114,10 +124,34 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
         return batch_loss, batch_rets, batch_lens
 
     # training loop
+    history = {'epoch': [], 'return': []}
     for i in range(epochs):
         batch_loss, batch_rets, batch_lens = train_one_epoch()
+        mean_ret = np.mean(batch_rets)
+        history['epoch'].append(i)
+        history['return'].append(mean_ret)
         print('epoch: %3d \t loss: %.3f \t return: %.3f \t ep_len: %.3f'%
-                (i, batch_loss, np.mean(batch_rets), np.mean(batch_lens)))
+                (i, batch_loss, mean_ret, np.mean(batch_lens)))
+
+    return history
+
+
+def save_chart(history, out_path, env_name, run=None):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(history['epoch'], history['return'], color='steelblue', linewidth=2)
+    ax.axhline(500, color='gray', linestyle='--', linewidth=1, label='Max Return (500)')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Mean Episode Return')
+    title = f'Simple Policy Gradient — {env_name}'
+    if run is not None:
+        title += f' (run {run})'
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f'Chart saved to {out_path}')
 
 if __name__ == '__main__':
     import argparse
@@ -125,6 +159,17 @@ if __name__ == '__main__':
     parser.add_argument('--env_name', '--env', type=str, default='CartPole-v1')
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--lr', type=float, default=1e-2)
+    parser.add_argument('--num-runs', type=int, default=1)
     args = parser.parse_args()
     print('\nUsing simplest formulation of policy gradient.\n')
-    train(env_name=args.env_name, render=args.render, lr=args.lr)
+
+    os.makedirs('results', exist_ok=True)
+    os.makedirs('results/vanilla_pg', exist_ok=True)
+    for run in range(args.num_runs):
+        if args.num_runs > 1:
+            print(f'\n--- Run {run} ---')
+        out_path = f'results/vanilla_pg/return_run{run}.png' if args.num_runs > 1 else 'results/vanilla_pg/return.png'
+        if Path(out_path).exists():
+            continue
+        history = train(env_name=args.env_name, render=args.render, lr=args.lr)
+        save_chart(history, out_path, args.env_name, run=run if args.num_runs > 1 else None)
