@@ -10,6 +10,8 @@ import os
 import matplotlib
 from pathlib import Path
 
+from core import MLPActorCritic
+
 # Choose backend before importing pyplot.
 # TkAgg works over SSH X11 without OpenGL/GLX; Agg is headless-only.
 _live_render = '--render' in sys.argv and '--save-gif' not in sys.argv
@@ -38,42 +40,41 @@ def mlp(sizes, activation=nn.Tanh, output_activation=nn.Identity):
 
 
 def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
-          epochs=50, batch_size=5000, render=False, save_gif=False):
+          epochs=50, batch_size=5000, render=False, save_gif=False,
+          checkpoint_dir=None):
 
     # make environment, check spaces, get obs / act dims
     env = gym.make(env_name)
-    assert isinstance(env.observation_space, Box), \
-        "This example only works for envs with continuous state spaces."
-    assert isinstance(env.action_space, Discrete), \
-        "This example only works for envs with discrete action spaces."
 
-    obs_dim = env.observation_space.shape[0]
-    n_acts = env.action_space.n
 
-    # make core of policy network
-    logits_net = mlp(sizes=[obs_dim]+hidden_sizes+[n_acts])
+    device = 'cpu'  # just use CPU for now.
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
 
-    # make function to compute action distribution
-    def get_policy(obs):
-        logits = logits_net(obs)
-        return Categorical(logits=logits)
+    ac = MLPActorCritic(env.observation_space, env.action_space,
+                        hidden_sizes=hidden_sizes)
+    ac.pi.to(device)
 
-    # make action selection function (outputs int actions, sampled from policy)
+    # ac.act() calls .numpy() internally which breaks on CUDA tensors.
+    # We call the distribution directly and move back to CPU for env stepping.
     def get_action(obs):
-        return get_policy(obs).sample().item()
+        obs_t = torch.as_tensor(obs, dtype=torch.float32).to(device)
+        with torch.no_grad():
+            return ac.pi._distribution(obs_t).sample().cpu().numpy()
 
     # make loss function whose gradient, for the right data, is policy gradient
     def compute_loss(obs, act, weights):
-        logp = get_policy(obs).log_prob(act)
+        obs, act, weights = obs.to(device), act.to(device), weights.to(device)
+        _, logp = ac.pi(obs, act)
         return -(logp * weights).mean()
 
     # make optimizer
-    optimizer = Adam(logits_net.parameters(), lr=lr)
+    optimizer = Adam(ac.pi.parameters(), lr=lr)
 
     # run one episode to visualize the current policy.
     # Uses rgb_array rendering + matplotlib to avoid pygame/GLX/OpenGL,
     # which fails over SSH X11 forwarding on headless GPU servers.
-    def render_episode(epoch, save_gif=False, gif_dir='results/reward_to_go/frames'):
+    def render_episode(epoch, save_gif=False, gif_dir=f'results/part_3/{env_name}/frames'):
         # Tell SDL to render offscreen — no window, no GLX needed.
         os.environ['SDL_VIDEODRIVER'] = 'offscreen'
         render_env = gym.make(env_name, render_mode="rgb_array")
@@ -98,7 +99,7 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
                 img_display.set_data(frame)
                 plt.pause(0.05)  # ~20 fps
             with torch.no_grad():
-                act = get_action(torch.as_tensor(obs, dtype=torch.float32))
+                act = get_action(obs)
             obs, rew, terminated, truncated, info = render_env.step(act)
             done = terminated or truncated
             ep_ret += rew
@@ -139,7 +140,7 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
             batch_obs.append(obs.copy())
 
             # act in the environment
-            act = get_action(torch.as_tensor(obs, dtype=torch.float32))
+            act = get_action(obs)
             obs, rew, terminated, truncated, info = env.step(act)
             done = terminated or truncated
 
@@ -167,8 +168,9 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
 
         # take a single policy gradient update step
         optimizer.zero_grad()
-        batch_loss = compute_loss(obs=torch.as_tensor(batch_obs, dtype=torch.float32),
-                                  act=torch.as_tensor(batch_acts, dtype=torch.int32),
+        act_dtype = torch.int32 if isinstance(env.action_space, Discrete) else torch.float32
+        batch_loss = compute_loss(obs=torch.as_tensor(np.array(batch_obs), dtype=torch.float32),
+                                  act=torch.as_tensor(np.array(batch_acts), dtype=act_dtype),
                                   weights=torch.as_tensor(batch_weights, dtype=torch.float32)
                                   )
         batch_loss.backward()
@@ -176,6 +178,9 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
         return batch_loss.item(), batch_rets, batch_lens
 
     # training loop
+    if checkpoint_dir:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
     history = {'epoch': [], 'return': []}
     for i in range(epochs):
         batch_loss, batch_rets, batch_lens = train_one_epoch()
@@ -184,6 +189,9 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
         history['return'].append(mean_ret)
         print('epoch: %3d \t loss: %.3f \t return: %.3f \t ep_len: %.3f'%
                 (i, batch_loss, mean_ret, np.mean(batch_lens)))
+        if checkpoint_dir:
+            ckpt_path = os.path.join(checkpoint_dir, f'epoch_{i:03d}.pt')
+            torch.save(ac.pi.state_dict(), ckpt_path)
         if render:
             ep_ret = render_episode(i, save_gif=save_gif)
             print(f'  [render] episode return: {ep_ret:.1f}')
@@ -191,13 +199,15 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
     return history
 
 
-def save_chart(history, out_path, env_name, run=None):
+def save_chart(history, out_path, env_name, run=None, max_return=None):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(history['epoch'], history['return'], color='steelblue', linewidth=2)
-    ax.axhline(500, color='gray', linestyle='--', linewidth=1, label='Max Return (500)')
+    if max_return is not None:
+        ax.axhline(max_return, color='gray', linestyle='--', linewidth=1,
+                   label=f'Max Return ({max_return})')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Mean Episode Return')
-    title = f'Simple Policy Gradient — {env_name}'
+    title = f'Policy Gradient (Part 3) — {env_name}'
     if run is not None:
         title += f' (run {run})'
     ax.set_title(title)
@@ -216,18 +226,22 @@ if __name__ == '__main__':
     parser.add_argument('--save-gif', action='store_true',
                         help='save per-epoch GIFs instead of live render (use on headless servers)')
     parser.add_argument('--lr', type=float, default=1e-2)
+    parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--num-runs', type=int, default=1)
     args = parser.parse_args()
     print('\nUsing simplest formulation of policy gradient.\n')
 
     os.makedirs('results', exist_ok=True)
-    os.makedirs('results/reward_to_go', exist_ok=True)
+    os.makedirs('results/part_3', exist_ok=True)
+    os.makedirs(f'results/part_3/{args.env_name}', exist_ok=True)
     for run in range(args.num_runs):
         if args.num_runs > 1:
             print(f'\n--- Run {run} ---')
-        out_path = f'results/reward_to_go/return_run{run}.png' if args.num_runs > 1 else 'results/reward_to_go/return.png'
+        out_path = f'results/part_3/{args.env_name}/run{run}.png' if args.num_runs > 1 else f'results/part_3/{args.env_name}.png'
         if Path(out_path).exists():
             continue
+        ckpt_dir = f'results/part_3/{args.env_name}/checkpoints' if args.num_runs == 1 else f'results/part_3/{args.env_name}/checkpoints/run{run}'
         history = train(env_name=args.env_name, render=args.render or args.save_gif,
-                        save_gif=args.save_gif, lr=args.lr)
+                        save_gif=args.save_gif, lr=args.lr, epochs=args.epochs,
+                        checkpoint_dir=ckpt_dir)
         save_chart(history, out_path, args.env_name, run=run if args.num_runs > 1 else None)

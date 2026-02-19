@@ -64,3 +64,22 @@ I added the reward-to-go implementation in `reward_to_go.py` and ran both the va
 Generally speaking the reward-to-go implementation achieves higher returns than the vanilla one on average return, indicating that it is more stable and possibly more effective in learning a policy. However, the reward-to-go implementation still has some flucturations and drops in the final epochs.
 
 ## Part 3: Continuous Actions
+
+I modified the code to use `MLPActorCritic` from `core.py` to make it work for both discrete and continuous action spaces. I tested it on CartPole (discrete) and "InvertedPendulum-v5" (continuous). I actually also tried it on Hopper-v5 and Ant-v5, but the learning was very unstable and the return was very low, so I won't include those results here. All the hyperparameters are the same as the default ones (epochs=50, lr=1e-2, etc.).
+
+For CartPole, it is just like the previous implementation.
+
+[CartPole](results/part_3/CartPole-v1/CartPole-v1_run4.png)
+
+For InvertedPendulum-v5:
+
+[InvertedPendulum-v5](results/part_3/InvertedPendulum-v5.png)
+
+And here's the visualization result:
+
+[InvertedPendulum-v5-visualization](results/part_3/InvertedPendulum-v5/checkpoints/gifs/epoch_049.gif)
+
+As shown above, the agent is able to keep the pendulum upright for a long time, until reaching a maximum return of 1000. This indicates that our implementation of policy gradient correctly works for continuous action spaces and can learn a good policy for the InvertedPendulum-v5 environment.
+
+
+
