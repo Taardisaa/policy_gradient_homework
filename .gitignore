@@ -185,3 +185,4 @@ results/part_3/InvertedPendulum-v5/**
 !results/part_3/InvertedPendulum-v5/
 !results/part_3/InvertedPendulum-v5/checkpoints/
 !results/part_3/InvertedPendulum-v5/checkpoints/epoch_049.pt
+results/part_3/CartPole-v1/**

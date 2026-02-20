@@ -81,5 +81,7 @@ And here's the visualization result:
 
 As shown above, the agent is able to keep the pendulum upright for a long time, until reaching a maximum return of 1000. This indicates that our implementation of policy gradient correctly works for continuous action spaces and can learn a good policy for the InvertedPendulum-v5 environment.
 
+## Extra Credit A: Baselines and Generalized Advantage Estimation
+
 
 
