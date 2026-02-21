@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Choose backend before importing pyplot.
 # TkAgg works over SSH X11 without OpenGL/GLX; Agg is headless-only.
-_live_render = '--save-gif' not in sys.argv
+_live_render = '--save-gif' not in sys.argv and '--plot' not in sys.argv
 matplotlib.use('TkAgg' if _live_render else 'Agg')
 import matplotlib.pyplot as plt
 
@@ -40,7 +40,13 @@ from core import MLPActorCritic
 def load_policy(env, checkpoint_path, hidden_sizes):
     ac = MLPActorCritic(env.observation_space, env.action_space,
                         hidden_sizes=hidden_sizes)
-    ac.pi.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+    ckpt = torch.load(checkpoint_path, map_location='cpu')
+    # Support both full checkpoint dicts (ppv.py) and bare pi state dicts (extra_a.py).
+    if isinstance(ckpt, dict) and 'pi' in ckpt:
+        ac.pi.load_state_dict(ckpt['pi'])
+        ac.v.load_state_dict(ckpt['v'])
+    else:
+        ac.pi.load_state_dict(ckpt)
     ac.pi.eval()
     return ac
 
@@ -98,12 +104,47 @@ def run_episode(ac, env_name, save_gif=False, gif_path=None, n_episodes=1):
     return returns
 
 
-def sweep_checkpoints(checkpoint_dir, env_name, hidden_sizes, save_gif, out_dir):
+def eval_episode(ac, env_name, n_episodes=1):
+    """Run n_episodes without rendering and return a list of episode returns."""
+    eval_env = gym.make(env_name)
+    returns = []
+    for _ in range(n_episodes):
+        obs, _ = eval_env.reset()
+        done = False
+        ep_ret = 0
+        while not done:
+            act = get_action(ac, obs)
+            obs, rew, terminated, truncated, _ = eval_env.step(act)
+            done = terminated or truncated
+            ep_ret += rew
+        returns.append(ep_ret)
+    eval_env.close()
+    return returns
+
+
+def save_sweep_chart(all_returns, out_path, env_name):
+    epochs = [e for e, _ in all_returns]
+    means = [r for _, r in all_returns]
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(epochs, means, color='steelblue', linewidth=2)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Mean Episode Return')
+    ax.set_title(f'PPO Eval — {env_name}')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f'Chart saved to {out_path}')
+
+
+def sweep_checkpoints(checkpoint_dir, env_name, hidden_sizes, save_gif, out_dir,
+                      n_episodes=1):
     """Load every epoch_*.pt in a directory and run one episode each."""
     ckpts = sorted(Path(checkpoint_dir).glob('epoch_*.pt'))
     if not ckpts:
         print(f'No checkpoints found in {checkpoint_dir}')
-        return
+        return []
 
     env = gym.make(env_name)
     all_returns = []
@@ -111,14 +152,22 @@ def sweep_checkpoints(checkpoint_dir, env_name, hidden_sizes, save_gif, out_dir)
         epoch = int(ckpt.stem.split('_')[1])
         print(f'\nEpoch {epoch:03d}  ({ckpt})')
         ac = load_policy(env, ckpt, hidden_sizes)
-        gif_path = os.path.join(out_dir, f'epoch_{epoch:03d}.gif') if save_gif else None
-        rets = run_episode(ac, env_name, save_gif=save_gif, gif_path=gif_path)
-        all_returns.append((epoch, np.mean(rets)))
+        if save_gif:
+            gif_path = os.path.join(out_dir, f'epoch_{epoch:03d}.gif')
+            rets = run_episode(ac, env_name, save_gif=True, gif_path=gif_path,
+                               n_episodes=n_episodes)
+        else:
+            rets = eval_episode(ac, env_name, n_episodes=n_episodes)
+        mean_ret = np.mean(rets)
+        all_returns.append((epoch, mean_ret))
+        print(f'  mean return = {mean_ret:.2f}')
     env.close()
 
     print('\n--- sweep summary ---')
     for epoch, r in all_returns:
         print(f'  epoch {epoch:03d}: mean return = {r:.2f}')
+
+    return all_returns
 
 
 if __name__ == '__main__':
@@ -137,6 +186,10 @@ if __name__ == '__main__':
                         help='Save GIF(s) instead of live display')
     parser.add_argument('--out-dir', type=str, default=None,
                         help='Output directory for GIFs (default: next to checkpoint)')
+    parser.add_argument('--plot', action='store_true',
+                        help='Plot mean eval return per epoch and save as PNG (requires --checkpoint-dir)')
+    parser.add_argument('--out-chart', type=str, default=None,
+                        help='Path for the eval chart PNG (default: <checkpoint-dir>/eval_return.png)')
     args = parser.parse_args()
 
     if args.checkpoint is None and args.checkpoint_dir is None:
@@ -146,8 +199,12 @@ if __name__ == '__main__':
 
     if args.checkpoint_dir:
         out_dir = args.out_dir or os.path.join(args.checkpoint_dir, 'gifs')
-        sweep_checkpoints(args.checkpoint_dir, args.env, hidden_sizes,
-                          save_gif=args.save_gif, out_dir=out_dir)
+        all_returns = sweep_checkpoints(args.checkpoint_dir, args.env, hidden_sizes,
+                                        save_gif=args.save_gif, out_dir=out_dir,
+                                        n_episodes=args.n_episodes)
+        if args.plot and all_returns:
+            out_chart = args.out_chart or os.path.join(args.checkpoint_dir, 'eval_return.png')
+            save_sweep_chart(all_returns, out_chart, args.env)
     else:
         env = gym.make(args.env)
         ac = load_policy(env, args.checkpoint, hidden_sizes)
