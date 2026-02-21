@@ -1,4 +1,5 @@
 import sys
+from typing import List, Optional
 import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
@@ -11,7 +12,7 @@ import matplotlib
 from pathlib import Path
 from loguru import logger
 
-from core import MLPActorCritic, discount_cumsum
+from core import *
 
 # Choose backend before importing pyplot.
 # TkAgg works over SSH X11 without OpenGL/GLX; Agg is headless-only.
@@ -20,30 +21,22 @@ matplotlib.use('TkAgg' if _live_render else 'Agg')
 import matplotlib.pyplot as plt
 
 
-def reward_to_go(rews):
-    n = len(rews)
-    rtgs = np.zeros_like(rews)
-    for i in reversed(range(n)):
-        rtgs[i] = rews[i] + (rtgs[i+1] if i+1 < n else 0)
-    return rtgs
+DEVICE = "cpu"
+# DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
-def mlp(sizes, activation=nn.Tanh, output_activation=nn.Identity):
-    """
-    Implementation of MLP.
-    """
-    # Build a feedforward neural network.
-    layers = []
-    for j in range(len(sizes)-1):
-        act = activation if j < len(sizes)-2 else output_activation
-        layers += [nn.Linear(sizes[j], sizes[j+1]), act()]
-    return nn.Sequential(*layers)
-
-
-def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
-          gamma=0.99, lam=0.97, vf_lr=1e-3, vf_iters=80,
-          epochs=50, batch_size=5000, render=False, save_gif=False,
-          checkpoint_dir=None):
+def train(
+    env_name: str ='CartPole-v1', 
+    hidden_sizes: List[int]=[32], 
+    lr: float=1e-2,
+    gamma: float=0.99, 
+    lam: float=0.97, 
+    vf_lr: float=1e-3, 
+    vf_iters: int=80,
+    epochs: int=50, 
+    batch_size: int=5000, 
+    render: bool=False, 
+    save_gif: bool=False,
+    checkpoint_dir: Optional[int]=None):
     """
     Train the policy gradient.
 
@@ -62,12 +55,9 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
     - checkpoint_dir: directory to save model checkpoints (one per epoch); if None, no checkpoints are saved
     """
 
-    # make environment, check spaces, get obs / act dims
     env = gym.make(env_name)
 
-
-    device = 'cpu'  # just use CPU for now.
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = DEVICE
     logger.info(f'Using device: {device}')
 
     ac = MLPActorCritic(env.observation_space, env.action_space,
@@ -78,18 +68,29 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
     # ac.act() calls .numpy() internally which breaks on CUDA tensors.
     # We call the distribution directly and move back to CPU for env stepping.
     def get_action(obs):
+        """
+        Get action from the policy given an observation.
+        """
         obs_t = torch.as_tensor(obs, dtype=torch.float32).to(device)
         with torch.no_grad():
-            # val = ac.v(obs_t).item()
-        # ep_vals.append(val)  # save value estimates for GAE
-        # batch_vals.append(val)  # also save for value function targets
             return ac.pi._distribution(obs_t).sample().cpu().numpy()
 
+
     # make loss function whose gradient, for the right data, is policy gradient
-    def compute_loss(obs, act, weights):
-        obs, act, weights = obs.to(device), act.to(device), weights.to(device)
+    def compute_loss(obs, act, adv):
+        """
+        Compute the loss.
+
+        Args:
+        - obs: batch of observations
+        - act: batch of actions taken in those observations
+        - adv: batch of advantages for each action
+
+        Policy gradient loss = -E[ log π(a|s) · A_t ]
+        """
+        obs, act, adv = obs.to(device), act.to(device), adv.to(device)
         _, logp = ac.pi(obs, act)
-        return -(logp * weights).mean()
+        return -(logp * adv).mean()
 
     # make optimizer
     optimizer = Adam(ac.pi.parameters(), lr=lr)
@@ -143,6 +144,7 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
 
         return ep_ret
 
+
     # for training policy
     def train_one_epoch():
         # make some empty lists for logging.
@@ -156,15 +158,11 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
         batch_rtgs = []          # for reward-to-go returns
         ep_vals = []           # value estimates for current episode (for GAE) 
 
-        # reset episode-specific variables
         obs, info = env.reset()  # updated reset handling
         done = False            # signal from environment that episode is over
         ep_rews = []            # list for rewards accrued throughout ep
-
-        # collect experience by acting in the environment with current policy
         while True:
-
-            # save obs
+            # save observation
             batch_obs.append(obs.copy())
 
             # act in the environment
@@ -173,6 +171,7 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
             with torch.no_grad():
                 val = ac.v(obs_t).item()
             ep_vals.append(val)
+            
             act = get_action(obs)
             obs, rew, terminated, truncated, info = env.step(act)
             done = terminated or truncated
@@ -229,7 +228,7 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
 
         # policy gradient step using GAE advantages as weights
         optimizer.zero_grad()
-        batch_loss = compute_loss(obs=obs_t, act=acts_t, weights=adv_t)
+        batch_loss = compute_loss(obs=obs_t, act=acts_t, adv=adv_t)
         batch_loss.backward()
         optimizer.step()
 
@@ -246,8 +245,27 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
     if checkpoint_dir:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # Auto-resume from latest checkpoint if one exists.
+    start_epoch = 0
+    if checkpoint_dir:
+        ckpt_files = sorted(Path(checkpoint_dir).glob('epoch_*.pt'))
+        if ckpt_files:
+            latest = ckpt_files[-1]
+            ckpt = torch.load(latest, map_location=device)
+            if isinstance(ckpt, dict) and 'pi' in ckpt:
+                ac.pi.load_state_dict(ckpt['pi'])
+                ac.v.load_state_dict(ckpt['v'])
+                optimizer.load_state_dict(ckpt['pi_opt'])
+                vf_optimizer.load_state_dict(ckpt['vf_opt'])
+                start_epoch = ckpt['epoch'] + 1
+            else:
+                # Legacy format: only pi state dict was saved.
+                ac.pi.load_state_dict(ckpt)
+                start_epoch = int(latest.stem.split('_')[1]) + 1
+            logger.info(f'Resumed from {latest} (continuing from epoch {start_epoch})')
+
     history = {'epoch': [], 'return': []}
-    for i in range(epochs):
+    for i in range(start_epoch, epochs):
         batch_loss, batch_rets, batch_lens = train_one_epoch()
         mean_ret = np.mean(batch_rets)
         history['epoch'].append(i)
@@ -256,7 +274,13 @@ def train(env_name='CartPole-v1', hidden_sizes=[32], lr=1e-2,
                 i, batch_loss, mean_ret, np.mean(batch_lens)))
         if checkpoint_dir:
             ckpt_path = os.path.join(checkpoint_dir, f'epoch_{i:03d}.pt')
-            torch.save(ac.pi.state_dict(), ckpt_path)
+            torch.save({
+                'pi': ac.pi.state_dict(),
+                'v': ac.v.state_dict(),
+                'pi_opt': optimizer.state_dict(),
+                'vf_opt': vf_optimizer.state_dict(),
+                'epoch': i,
+            }, ckpt_path)
         if render:
             ep_ret = render_episode(i, save_gif=save_gif)
             logger.info(f'[render] episode return: {ep_ret:.1f}')
@@ -365,8 +389,6 @@ def main(
         if num_runs > 1:
             logger.info(f'--- Run {run} ---')
         out_path = f'results/extra_a/{env_name}/run{run}.png' if num_runs > 1 else f'results/extra_a/{env_name}.png'
-        if Path(out_path).exists():
-            continue
         ckpt_dir = f'results/extra_a/{env_name}/checkpoints' if num_runs == 1 else f'results/extra_a/{env_name}/checkpoints/run{run}'
         history = train(env_name=env_name, render=render or save_gif,
                         save_gif=save_gif, lr=lr, epochs=epochs,

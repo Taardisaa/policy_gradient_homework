@@ -83,5 +83,22 @@ As shown above, the agent is able to keep the pendulum upright for a long time, 
 
 ## Extra Credit A: Baselines and Generalized Advantage Estimation
 
+I modified the code to use the critic model to estimate the value function, and implemented the GAE to compute the advantage estimates. I tested it on both CartPole and InvertedPendulum-v5. The learning curves are shown below:
 
+For CartPole:
 
+[CartPole with GAE](results/extra_a/CartPole-v1.png)
+
+For InvertedPendulum-v5:
+
+[InvertedPendulum-v5 with GAE](results/extra_a/InvertedPendulum-v5.png)
+
+From the above 2 plots, we can see that the policy with GAE achieves higher returns, therefore easily reaching the maximum of 1000 for InvertedPendulum-v5.
+
+However, in Ant-v5, the learning is still very unstable:
+
+[Ant-v5 with GAE](results/extra_a/Ant-v5.png)
+
+Sometimes, it can achieve a (relatively) high reward of around 1400, but then it drops to a very low one. Through visualization, I also noticed that the model failed to learn a policy that can make the ant to move forward, and the ant just kept twisting its legs.
+
+[Ant-v5-visualization](results/extra_a/Ant-v5/checkpoints/gifs/epoch_099.gif)
