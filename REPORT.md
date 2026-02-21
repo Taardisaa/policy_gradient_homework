@@ -198,7 +198,7 @@ For InvertedPendulum-v5:
 
 For Ant-v5:
 
-![Ant-v5 with PPO](results/ppo/Ant-v5.png)
+![Ant-v5 with PPO](results/ppo/Ant-v5/checkpoints/eval_return.png)
 
 And also their visualizations:
 
