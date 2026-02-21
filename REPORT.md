@@ -207,6 +207,6 @@ And also their visualizations:
 ![InvertedPendulum-v5 visualization](results/ppo/InvertedPendulum-v5/checkpoints/gifs/epoch_049.gif)
 
 <!-- ![Ant-v5 visualization](results/ppo/Ant-v5/checkpoints/gifs/epoch_599.gif) -->
-Ant-v5 visualization can be seen [here](https://github.com/Taardisaa/policy_gradient_homework/blob/main/results/ppo/Ant-v5/checkpoints/gifs/epoch_599.gif)
+Ant-v5 visualization can be seen [here](https://github.com/Taardisaa/policy_gradient_homework/blob/main/results/ppo/Ant-v5/checkpoints/gifs/epoch_599.gif).
 
 The first 2 environments are very trivial, therefore PPO easily learns a good policy in 50 epochs. However, for Ant-v5, the learning is much harder. But the good news is, PPO is able to learn, and gradually increase its return over time, eventually reaching around 2000 or more after 600 epochs. The visualization also shows that the ant is able to learn to move forward.
